@@ -115,8 +115,8 @@ function formatLoggedSpan ($log_item, $text, $html_class = '')
 		$title = htmlspecialchars ($log_item['user'] . ', ' . formatAge ($log_item['time']), ENT_QUOTES);
 	}
 	return "<span" .
-		(strlen ($html_class) ? " class='$html_class'" : '') .
-		(strlen ($title) ? " title='$title'" : '') .
+		($html_class != '' ? " class='$html_class'" : '') .
+		($title != '' ? " title='$title'" : '') .
 		">$text</span>";
 }
 
@@ -218,73 +218,67 @@ function getPortInfoAJAX()
 		'get-port-portmac' => 'get_port_mac_list',
 		'get-port-conf' => 'get_port_conf',
 	);
-	genericAssertion ('object_id', 'uint');
-	fixContext (spotEntity ('object', $_REQUEST['object_id']));
+	$object_id = genericAssertion ('object_id', 'uint');
+	fixContext (spotEntity ('object', $object_id));
 	assertPermission ('object', 'liveports', $opmap[$_REQUEST['ac']]);
-	echo json_encode ($funcmap[$_REQUEST['ac']] ($_REQUEST['object_id']));
+	echo json_encode ($funcmap[$_REQUEST['ac']] ($object_id));
 }
 
 function updatePortRsvAJAX()
 {
-	global $sic;
-	assertUIntArg ('id');
-	assertStringArg ('text', TRUE);
-	$port_info = getPortInfo ($sic['id']);
+	$text = genericAssertion ('text', 'string0');
+	$port_info = getPortInfo (genericAssertion ('id', 'uint'));
 	fixContext (spotEntity ('object', $port_info['object_id']));
 	assertPermission ('object', 'ports', 'editPort');
 	if ($port_info['linked'])
-		throw new RackTablesError ('Cant update port comment: port is already linked');
+		throw new RackTablesError ('Can\'t update port comment: port is already linked');
 	if (! isset ($port_info['reservation_comment']))
 		$port_info['reservation_comment'] = '';
-	if ($port_info['reservation_comment'] !== $sic['text'])
-		commitUpdatePortComment ($sic['id'], $sic['text']);
+	if ($port_info['reservation_comment'] !== $text)
+		commitUpdatePortComment ($port_info['id'], $text);
 	echo 'OK';
 }
 
 function updateIPNameAJAX()
 {
-	global $sic;
-	assertStringArg ('text', TRUE);
+	$text = genericAssertion ('text', 'string0');
 	$ip_bin = assertIPArg ('id');
 	$addr = getIPAddress ($ip_bin);
 	if (! empty ($addr['allocs']) && empty ($addr['name']))
-		throw new RackTablesError ('Cant update IP name: address is allocated');
+		throw new RackTablesError ('Can\'t update IP name: address is allocated');
 	$net = spotNetworkByIP ($ip_bin);
 	if (isset ($net))
 		fixContext ($net);
 	assertPermission ('ipaddress', 'properties', 'editAddress');
-	$reserved = (empty ($sic['text']) ? 'no' : $addr['reserved']); // unset reservation if user clears name
+	$reserved = ($text == '' ? 'no' : $addr['reserved']); // unset reservation if user clears name
 	$comment = (empty ($addr['comment']) ? '' : $addr['comment']);
-	updateAddress ($ip_bin, $sic['text'], $reserved, $comment);
+	updateAddress ($ip_bin, $text, $reserved, $comment);
 	echo 'OK';
 }
 
 function updateIPCommentAJAX()
 {
-	global $sic;
-	assertStringArg ('text', TRUE);
+	$text = genericAssertion ('text', 'string0');
 	$ip_bin = assertIPArg ('id');
 	$addr = getIPAddress ($ip_bin);
 	$net = spotNetworkByIP ($ip_bin);
 	if (isset ($net))
 		fixContext ($net);
 	assertPermission ('ipaddress', 'properties', 'editAddress');
-	updateAddress ($ip_bin, $addr['name'], $addr['reserved'], $sic['text']);
+	updateAddress ($ip_bin, $addr['name'], $addr['reserved'], $text);
 	echo 'OK';
 }
 
 function updateCableIdAJAX()
 {
-	global $sic;
-	assertUIntArg ('id');
-	assertStringArg ('text', TRUE);
-	$port_info = getPortInfo ($sic['id']);
+	$text = genericAssertion ('text', 'string0');
+	$port_info = getPortInfo (genericAssertion ('id', 'uint'));
 	fixContext (spotEntity ('object', $port_info['object_id']));
 	assertPermission ('object', 'ports', 'editPort');
 	if (! $port_info['linked'])
-		throw new RackTablesError ('Cant update cable ID: port is not linked');
-	if ($port_info['reservation_comment'] !== $sic['text'])
-		commitUpdatePortLink ($sic['id'], $sic['text']);
+		throw new RackTablesError ('Can\'t update cable ID: port is not linked');
+	if ($port_info['reservation_comment'] !== $text)
+		commitUpdatePortLink ($port_info['id'], $text);
 	echo 'OK';
 }
 
@@ -305,7 +299,7 @@ function getNetUsageAJAX()
 	list ($ip, $mask) = explode ('/', $_REQUEST['net_id']);
 	$ip_bin = ip_parse ($ip);
 	$net = spotNetworkByIP ($ip_bin, $mask + 1);
-	if (! isset ($net) or $net['mask'] != $mask)
+	if (! isset ($net) || $net['mask'] != $mask)
 		$net = constructIPRange ($ip_bin, $mask);
 	loadIPAddrList ($net);
 	echo getRenderedIPNetCapacity ($net);

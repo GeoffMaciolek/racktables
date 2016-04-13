@@ -82,6 +82,17 @@ class PureFunctionTest extends PHPUnit_Framework_TestCase
 		call_user_func_array ($func, $input);
 	}
 
+	/**
+	 * @group small
+	 * @dataProvider providerMakeWhereSQL
+	 */
+	public function testMakeWhereSQL ($where_columns, $conjunction, $expected_str, $expected_params)
+	{
+		$actual_str = makeWhereSQL ($where_columns, $conjunction, $actual_params);
+		$this->assertEquals ($expected_str, $actual_str);
+		$this->assertSame ($expected_params, $actual_params);
+	}
+
 	public function providerUnaryEquals ()
 	{
 		return array
@@ -122,6 +133,10 @@ class PureFunctionTest extends PHPUnit_Framework_TestCase
 			array ('questionMarks', 2, '?, ?'),
 			array ('questionMarks', 3, '?, ?, ?'),
 
+			array ('makeSetSQL', array ('one'), 'one=?'),
+			array ('makeSetSQL', array ('one', 'two'), 'one=?, two=?'),
+			array ('makeSetSQL', array ('one', 'two', 'three'), 'one=?, two=?, three=?'),
+
 			array
 			(
 				'formatPortIIFOIF',
@@ -157,6 +172,86 @@ class PureFunctionTest extends PHPUnit_Framework_TestCase
 			array ('acceptable8021QConfig', array ('mode' => 'access', 'native' => 2, 'allowed' => array (3)), FALSE),
 			array ('acceptable8021QConfig', array ('mode' => 'access', 'native' => 1, 'allowed' => array (1, 2, 3)), FALSE),
 			array ('acceptable8021QConfig', array ('mode' => 'access', 'native' => 3, 'allowed' => array()), FALSE),
+
+			// XXX: The data set below covers only two modes though the function can accept more. It is not
+			// clear whether those additional branches are dead or they need to be tested as well. Also there
+			// are no tests for invalid input as the function does not throw an exception on error and that
+			// should be fixed first.
+			array ('serializeVLANPack', array ('mode' => 'access', 'allowed' => array (290), 'native' => 290), 'A290'),
+			array ('serializeVLANPack', array ('mode' => 'trunk', 'allowed' => array (290), 'native' => 290), 'T290'),
+			array ('serializeVLANPack', array ('mode' => 'trunk', 'allowed' => array (291, 292, 293), 'native' => 0), 'T+291-293'),
+			array ('serializeVLANPack', array ('mode' => 'trunk', 'allowed' => array (294, 300, 305), 'native' => 305), 'T305+294, 300'),
+			array ('serializeVLANPack', array ('mode' => 'trunk', 'allowed' => array (2, 3, 4, 5, 6, 7, 8, 9), 'native' => 5), 'T5+2-4, 6-9'),
+
+			array ('listToRanges', array(), array()),
+			array ('listToRanges', array (7), array (array ('from' => 7, 'to' => 7))),
+			array ('listToRanges', array (2, 4, 3, 5, 1), array (array ('from' => 1, 'to' => 5))),
+			array ('listToRanges', array (12, 24, 23, 25, 11), array (array ('from' => 11, 'to' => 12), array ('from' => 23, 'to' => 25))),
+			array ('listToRanges', array (22, 24, 23, 25, 11), array (array ('from' => 11, 'to' => 11), array ('from' => 22, 'to' => 25))),
+
+			array ('iosParseVLANString', '10', array (10)),
+			array ('iosParseVLANString', '10,20', array (10, 20)),
+			array ('iosParseVLANString', '10, 20, 30', array (10, 20, 30)),
+			array ('iosParseVLANString', '3-8', array (3, 4, 5, 6, 7, 8)),
+			array ('iosParseVLANString', '10, 20-25, 30', array (10, 20, 21, 22, 23, 24, 25, 30)),
+
+			array ('textareaCooked', '', array()),
+			array ('textareaCooked', '  ', array()),
+			array ('textareaCooked', "\r\n\r\n", array()),
+			array ('textareaCooked', "\n \n\t\n \n", array()),
+			array ('textareaCooked', 'abcd', array ('abcd')),
+			array ('textareaCooked', "\nabcd\n", array ('abcd')),
+			array ('textareaCooked', "\r\n  \r\nabcd\r\n  \t\t         \r\n", array ('abcd')),
+			array ('textareaCooked', "abcd\r\n   efgh\r\nijkl        \r\n", array ('abcd', 'efgh', 'ijkl')),
+
+			array ('l2addressForDatabase', '', ''),
+			array ('l2addressForDatabase', ' ', ''),
+			array ('l2addressForDatabase', ' 010203abcdef ', '010203ABCDEF'), // RE_L2_SOLID
+			array ('l2addressForDatabase', '1:2:3:ab:cd:ef ', '010203ABCDEF'), // RE_L2_IFCFG
+			array ('l2addressForDatabase', ' 0102.03ab.cdef', '010203ABCDEF'), // RE_L2_CISCO
+			array ('l2addressForDatabase', '0102-03ab-cdef', '010203ABCDEF'), // RE_L2_HUAWEI
+			array ('l2addressForDatabase', '01-02-03-ab-cd-ef', '010203ABCDEF'), // RE_L2_IPCFG
+			array ('l2addressForDatabase', '000000000000', ''), // a special case
+			array ('l2addressForDatabase', '0102030405abcdef  ', '0102030405ABCDEF'), // RE_L2_WWN_SOLID
+			array ('l2addressForDatabase', ' 01-02-03-04-05-ab-cd-ef', '0102030405ABCDEF'), // RE_L2_WWN_HYPHEN
+			array ('l2addressForDatabase', ' 1:2:3:4:5:ab:cd:ef ', '0102030405ABCDEF'), // RE_L2_WWN_COLON
+
+			array ('nextMACAddress', '', ''),
+			array ('nextMACAddress', '12:34:56:78:90:ab', '12:34:56:78:90:AC'),
+			array ('nextMACAddress', '12:34:56:78:90:ff', '12:34:56:78:91:00'),
+			array ('nextMACAddress', '12:34:56:78:ff:ff', '12:34:56:79:00:00'),
+			array ('nextMACAddress', '12:34:56:ff:ff:ff', '12:34:57:00:00:00'),
+			array ('nextMACAddress', '12:34:56:fe:ff:ff', '12:34:56:FF:00:00'),
+
+			// implicit 2nd argument
+			array ('validTagName', 'tag', TRUE),
+			array ('validTagName', 'another tag', TRUE),
+			array ('validTagName', 'another-tag', TRUE),
+			array ('validTagName', 'another_tag', TRUE),
+			array ('validTagName', 'abc 123 def', TRUE),
+			array ('validTagName', '100%', TRUE),
+			array ('validTagName', 'racks 20~39', TRUE),
+			array ('validTagName', 'racks 40+', TRUE),
+			array ('validTagName', 'racks 10:', TRUE),
+			array ('validTagName', '2nd tag', TRUE),
+			array ('validTagName', 'left+right', TRUE),
+			array ('validTagName', '2015', TRUE),
+			array ('validTagName', '2015-2016', TRUE),
+			array ('validTagName', '-2016', TRUE),
+			array ('validTagName', '-50%', TRUE),
+			array ('validTagName', 'size: XL', TRUE),
+			array ('validTagName', 'size: XL+', TRUE),
+			array ('validTagName', 'iqn.domain', TRUE),
+			array ('validTagName', '', FALSE),
+			array ('validTagName', ' tag ', FALSE),
+			array ('validTagName', 'tag?', FALSE),
+			array ('validTagName', 'tag!', FALSE),
+			array ('validTagName', 'tag_', FALSE),
+			array ('validTagName', 'tag~', FALSE),
+			array ('validTagName', 'tag.', FALSE),
+			array ('validTagName', '$tag', FALSE),
+			array ('validTagName', '2015-', FALSE),
+			array ('validTagName', 'iqn.domain.', FALSE),
 		);
 	}
 
@@ -227,8 +322,40 @@ class PureFunctionTest extends PHPUnit_Framework_TestCase
 			array ('HTTPDateToUnixTime', 'Thursday, 01-Jan-98 00:00:00 GMT', 883612800), # OK
 			# asctime()
 			array ('HTTPDateToUnixTime', 'Thu Mar  8 12:00:00 2007', 1173355200), # OK
+			array ('HTTPDateToUnixTime', 'Thu Mar 8 12:00:00 2007', FALSE), # missing space
 			array ('HTTPDateToUnixTime', 'Tus Mar  8 12:00:00 2007', FALSE), # invalid week day name
 			array ('HTTPDateToUnixTime', 'Wed Dec 31 23:59:59 1997', 883612799), # OK
+
+			array ('ip4_mask', 0, "\x00\x00\x00\x00"),
+			array ('ip4_mask', 24, "\xFF\xFF\xFF\x00"),
+			array ('ip4_mask', 32, "\xFF\xFF\xFF\xFF"),
+
+			array ('ip6_mask', 0, "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"),
+			array ('ip6_mask', 80, "\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\x00\x00\x00\x00\x00\x00"),
+			array ('ip6_mask', 128, "\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF"),
+
+			array ('ip_get_arpa', "\x0A\x0B\x0C\x0D", '13.12.11.10.in-addr.arpa'),
+			array ('ip_get_arpa', "\xC0\x00\x02\xFF", '255.2.0.192.in-addr.arpa'),
+			array ('ip_get_arpa', "\xC0\xA8\xC0\xFF", '255.192.168.192.in-addr.arpa'),
+			array ('ip_get_arpa', "\xAC\x11\xBB\x00", '0.187.17.172.in-addr.arpa'),
+			array
+			(
+				'ip_get_arpa',
+				"\x20\x01\x0D\xB8\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01",
+				'1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa'
+			),
+			array
+			(
+				'ip_get_arpa',
+				"\x20\x01\x0D\xB8\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0A\x0B\x0C",
+				'c.0.b.0.a.0.9.0.8.0.7.0.6.0.5.0.4.0.3.0.2.0.1.0.8.b.d.0.1.0.0.2.ip6.arpa'
+			),
+			array
+			(
+				'ip_get_arpa',
+				"\x20\x01\x0D\xB8\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF",
+				'f.f.f.f.f.f.f.f.f.f.f.f.f.f.f.f.f.f.f.f.f.f.f.f.8.b.d.0.1.0.0.2.ip6.arpa'
+			),
 		);
 	}
 
@@ -485,6 +612,162 @@ class PureFunctionTest extends PHPUnit_Framework_TestCase
 			array ('cmp_array_sizes', array (0, TRUE), array (FALSE, ''), 0),
 			array ('cmp_array_sizes', array (0), array(), 1),
 			array ('cmp_array_sizes', array (2), array(1, 1), -1),
+
+			array ('buildVLANFilter', 'access', '', array (array ('from' => 1, 'to' => 4094))),
+			array ('buildVLANFilter', 'access', '100-200', array (array ('from' => 100, 'to' => 200))),
+			array ('buildVLANFilter', 'access', '0-200', array (array ('from' => 1, 'to' => 200))),
+			array ('buildVLANFilter', 'access', '100-20000', array (array ('from' => 100, 'to' => 4094))),
+			array ('buildVLANFilter', 'access', '0-20000', array (array ('from' => 1, 'to' => 4094))),
+			array ('buildVLANFilter', 'trunk', '', array (array ('from' => 2, 'to' => 4094))),
+			array ('buildVLANFilter', 'trunk', '100-200', array (array ('from' => 100, 'to' => 200))),
+			array ('buildVLANFilter', 'trunk', '0-200', array (array ('from' => 2, 'to' => 200))),
+			array ('buildVLANFilter', 'trunk', '100-20000', array (array ('from' => 100, 'to' => 4094))),
+			array ('buildVLANFilter', 'trunk', '0-20000', array (array ('from' => 2, 'to' => 4094))),
+			array ('buildVLANFilter', 'uplink', '', array (array ('from' => 2, 'to' => 4094))),
+			array ('buildVLANFilter', 'uplink', '100-200', array (array ('from' => 100, 'to' => 200))),
+			array ('buildVLANFilter', 'uplink', '0-200', array (array ('from' => 2, 'to' => 200))),
+			array ('buildVLANFilter', 'uplink', '100-20000', array (array ('from' => 100, 'to' => 4094))),
+			array ('buildVLANFilter', 'uplink', '0-20000', array (array ('from' => 2, 'to' => 4094))),
+			array ('buildVLANFilter', 'downlink', '', array (array ('from' => 2, 'to' => 4094))),
+			array ('buildVLANFilter', 'downlink', '100-200', array (array ('from' => 100, 'to' => 200))),
+			array ('buildVLANFilter', 'downlink', '0-200', array (array ('from' => 2, 'to' => 200))),
+			array ('buildVLANFilter', 'downlink', '100-20000', array (array ('from' => 100, 'to' => 4094))),
+			array ('buildVLANFilter', 'downlink', '0-20000', array (array ('from' => 2, 'to' => 4094))),
+			array ('buildVLANFilter', 'anymode', '', array (array ('from' => 2, 'to' => 4094))),
+			array ('buildVLANFilter', 'anymode', '100-200', array (array ('from' => 100, 'to' => 200))),
+			array ('buildVLANFilter', 'anymode', '0-200', array (array ('from' => 2, 'to' => 200))),
+			array ('buildVLANFilter', 'anymode', '100-20000', array (array ('from' => 100, 'to' => 4094))),
+			array ('buildVLANFilter', 'anymode', '0-20000', array (array ('from' => 2, 'to' => 4094))),
+			array ('buildVLANFilter', 'none', '', array ()),
+			array ('buildVLANFilter', 'none', '100-200', array ()),
+			array ('buildVLANFilter', 'none', '0-200', array ()),
+			array ('buildVLANFilter', 'none', '100-20000', array ()),
+			array ('buildVLANFilter', 'none', '0-20000', array ()),
+			array ('buildVLANFilter', 'abcde', '', array ()), // this is a bug, ought to be InvalidArgException
+
+			array ('matchVLANFilter', 5, array (array ('from' => 10, 'to' => 20), array ('from' => 30, 'to' => 40), array ('from' => 45, 'to' => 45)), FALSE),
+			array ('matchVLANFilter', 10, array (array ('from' => 10, 'to' => 20), array ('from' => 30, 'to' => 40), array ('from' => 45, 'to' => 45)), TRUE),
+			array ('matchVLANFilter', 20, array (array ('from' => 10, 'to' => 20), array ('from' => 30, 'to' => 40), array ('from' => 45, 'to' => 45)), TRUE),
+			array ('matchVLANFilter', 25, array (array ('from' => 10, 'to' => 20), array ('from' => 30, 'to' => 40), array ('from' => 45, 'to' => 45)), FALSE),
+			array ('matchVLANFilter', 35, array (array ('from' => 10, 'to' => 20), array ('from' => 30, 'to' => 40), array ('from' => 45, 'to' => 45)), TRUE),
+			array ('matchVLANFilter', 41, array (array ('from' => 10, 'to' => 20), array ('from' => 30, 'to' => 40), array ('from' => 45, 'to' => 45)), FALSE),
+			array ('matchVLANFilter', 45, array (array ('from' => 10, 'to' => 20), array ('from' => 30, 'to' => 40), array ('from' => 45, 'to' => 45)), TRUE),
+
+			array ('filterVLANList', array (5, 6, 7, 8, 16, 20, 21), array (array ('from' => 7, 'to' => 7), array ('from' => 10, 'to' => 20)), array (7, 16, 20)),
+			array ('filterVLANList', array (8, 30), array (array ('from' => 7, 'to' => 7), array ('from' => 10, 'to' => 20)), array()),
+			array ('filterVLANList', array (14, 19), array (array ('from' => 7, 'to' => 7), array ('from' => 10, 'to' => 20)), array (14, 19)),
+
+			// explicit 2nd argument
+			array ('listToRanges', array(), 0, array()),
+			array ('listToRanges', array (7), 0, array (array ('from' => 7, 'to' => 7))),
+			array ('listToRanges', array (2, 4, 3, 5, 1), 0, array (array ('from' => 1, 'to' => 5))),
+			array ('listToRanges', array (12, 24, 23, 25, 11), 0, array (array ('from' => 11, 'to' => 12), array ('from' => 23, 'to' => 25))),
+			array ('listToRanges', array (22, 24, 23, 25, 11), 0, array (array ('from' => 11, 'to' => 11), array ('from' => 22, 'to' => 25))),
+
+			array ('listToRanges', array (2, 3, 1), 1, array (array ('from' => 1, 'to' => 1), array ('from' => 2, 'to' => 2), array ('from' => 3, 'to' => 3))),
+			array ('listToRanges', array (10, 11, 12), 4, array (array ('from' => 10, 'to' => 12))),
+			array ('listToRanges', array (10, 11, 12, 13, 14, 15, 16, 17), 4, array (array ('from' => 10, 'to' => 13), array ('from' => 14, 'to' => 17))),
+
+			array ('mergeTagChains', array(), array(), array()),
+			array
+			(
+				'mergeTagChains',
+				array (array ('id' => 1, 'tag' => 'one')),
+				array (array ('id' => 10, 'tag' => 'ten')),
+				array (1 => array ('id' => 1, 'tag' => 'one'), 10 => array ('id' => 10, 'tag' => 'ten')),
+			),
+			array
+			(
+				'mergeTagChains',
+				array(),
+				array (array ('id' => 10, 'tag' => 'ten')),
+				array (10 => array ('id' => 10, 'tag' => 'ten')),
+			),
+			array
+			(
+				'mergeTagChains',
+				array (array ('id' => 1, 'tag' => 'one')),
+				array(),
+				array (1 => array ('id' => 1, 'tag' => 'one')),
+			),
+			array
+			(
+				'mergeTagChains',
+				array (array ('id' => 1, 'tag' => 'one'), array ('id' => 2, 'tag' => 'two')),
+				array (array ('id' => 10, 'tag' => 'ten'), array ('id' => 2, 'tag' => 'two')),
+				array (1 => array ('id' => 1, 'tag' => 'one'), 2 => array ('id' => 2, 'tag' => 'two'), 10 => array ('id' => 10, 'tag' => 'ten')),
+			),
+
+			// explicit 2nd argument
+			array ('validTagName', 'tag', FALSE, TRUE),
+			array ('validTagName', 'another tag', FALSE, TRUE),
+			array ('validTagName', 'another-tag', FALSE, TRUE),
+			array ('validTagName', 'another_tag', FALSE, TRUE),
+			array ('validTagName', 'abc 123 def', FALSE, TRUE),
+			array ('validTagName', '100%', FALSE, TRUE),
+			array ('validTagName', 'racks 20~39', FALSE, TRUE),
+			array ('validTagName', 'racks 40+', FALSE, TRUE),
+			array ('validTagName', 'racks 10:', FALSE, TRUE),
+			array ('validTagName', '2nd tag', FALSE, TRUE),
+			array ('validTagName', 'left+right', FALSE, TRUE),
+			array ('validTagName', '2015', FALSE, TRUE),
+			array ('validTagName', '2015-2016', FALSE, TRUE),
+			array ('validTagName', '-2016', FALSE, TRUE),
+			array ('validTagName', '-50%', FALSE, TRUE),
+			array ('validTagName', 'size: XL', FALSE, TRUE),
+			array ('validTagName', 'size: XL+', FALSE, TRUE),
+			array ('validTagName', 'iqn.domain', FALSE, TRUE),
+			array ('validTagName', '', FALSE, FALSE),
+			array ('validTagName', ' tag ', FALSE, FALSE),
+			array ('validTagName', 'tag?', FALSE, FALSE),
+			array ('validTagName', 'tag!', FALSE, FALSE),
+			array ('validTagName', 'tag_', FALSE, FALSE),
+			array ('validTagName', 'tag~', FALSE, FALSE),
+			array ('validTagName', 'tag.', FALSE, FALSE),
+			array ('validTagName', '$tag', FALSE, FALSE),
+			array ('validTagName', '2015-', FALSE, FALSE),
+			array ('validTagName', 'iqn.domain.', FALSE, FALSE),
+
+			array ('validTagName', '$tag', TRUE, TRUE),
+			array ('validTagName', '$another tag', TRUE, TRUE),
+			array ('validTagName', '$another tag', TRUE, TRUE),
+			array ('validTagName', '$another-tag', TRUE, TRUE),
+			array ('validTagName', '$another_tag', TRUE, TRUE),
+			array ('validTagName', '$abc 123 def', TRUE, TRUE),
+			array ('validTagName', '$100%', TRUE, TRUE),
+			array ('validTagName', '$racks 20~39', TRUE, TRUE),
+			array ('validTagName', '$racks 40+', TRUE, TRUE),
+			array ('validTagName', '$racks 10:', TRUE, TRUE),
+			array ('validTagName', '$2nd tag', TRUE, TRUE),
+			array ('validTagName', '$left+right', TRUE, TRUE),
+			array ('validTagName', '$2015', TRUE, TRUE),
+			array ('validTagName', '$2015-2016', TRUE, TRUE),
+			array ('validTagName', '$-2016', TRUE, TRUE),
+			array ('validTagName', '$-50%', TRUE, TRUE),
+			array ('validTagName', '$size: XL', TRUE, TRUE),
+			array ('validTagName', '$size: XL+', TRUE, TRUE),
+			array ('validTagName', '$iqn.domain', TRUE, TRUE),
+			array ('validTagName', '', TRUE, FALSE),
+			array ('validTagName', '$ tag ', TRUE, FALSE),
+			array ('validTagName', '$tag?', TRUE, FALSE),
+			array ('validTagName', '$tag!', TRUE, FALSE),
+			array ('validTagName', '$tag_', TRUE, FALSE),
+			array ('validTagName', '$tag~', TRUE, FALSE),
+			array ('validTagName', '$tag.', TRUE, FALSE),
+			array ('validTagName', 'tag', TRUE, TRUE), // not quite expected but as far as the function goes is correct
+			array ('validTagName', '$2015-', TRUE, FALSE),
+			array ('validTagName', '$iqn.domain.', TRUE, FALSE),
+
+			array ('goodModeForVSTRole', 'access', 'access', TRUE),
+			array ('goodModeForVSTRole', 'access', 'trunk', FALSE),
+			array ('goodModeForVSTRole', 'access', 'anymode', TRUE),
+			array ('goodModeForVSTRole', 'access', 'uplink', FALSE),
+			array ('goodModeForVSTRole', 'access', 'downlink', FALSE),
+			array ('goodModeForVSTRole', 'trunk', 'access', FALSE),
+			array ('goodModeForVSTRole', 'trunk', 'trunk', TRUE),
+			array ('goodModeForVSTRole', 'trunk', 'anymode', TRUE),
+			array ('goodModeForVSTRole', 'trunk', 'uplink', TRUE),
+			array ('goodModeForVSTRole', 'trunk', 'downlink', TRUE),
 		);
 	}
 
@@ -542,6 +825,58 @@ class PureFunctionTest extends PHPUnit_Framework_TestCase
 			array ('array_values_same', array (0, array ())),
 			array ('array_values_same', array (array (1), '1')),
 			array ('array_values_same', array (NULL, NULL)),
+
+			array ('iosParseVLANString', array ('')),
+			array ('iosParseVLANString', array ('x')),
+			array ('iosParseVLANString', array ('1,x,3')),
+			array ('iosParseVLANString', array ('1-3,x,10')),
+
+			array ('ip4_mask', array (-1)),
+			array ('ip4_mask', array (33)),
+
+			array ('ip6_mask', array (-1)),
+			array ('ip6_mask', array (129)),
+
+			array ('l2addressForDatabase', array ('010203abcd')), // invalid length
+			array ('l2addressForDatabase', array ('010203abcdefff')), // invalid length
+			array ('l2addressForDatabase', array ('010203abcdeh')), // length OK but not hexadecimal
+			array ('l2addressForDatabase', array ('0102:03ab:cdef')), // not a known format
+			array ('l2addressForDatabase', array ('01.02.03.ab.cd.ef')), // not a known format
+			array ('l2addressForDatabase', array (' 1. 2. 3.ab.cd.ef')), // not a known format
+			array ('l2addressForDatabase', array ('01.02.03-ab-cd:ef')), // not a known format
+
+			array ('nextMACAddress', array ('010203abcdef')),
+			array ('nextMACAddress', array ('0102.03ab.cdef')),
+			array ('nextMACAddress', array ('01-02-03-ab-cd-ef')),
+			array ('nextMACAddress', array ('abcd')),
+			array ('nextMACAddress', array ('01:02:03:ab:cd:gg')),
+			array ('nextMACAddress', array ('01:02:03:ab:cd')),
+			array ('nextMACAddress', array ('1:2:3:ab:cd:ef')),
+
+			array ('makeWhereSQL', array (array ('abc' => NULL), 'NOT')),
+			array ('makeWhereSQL', array (array(), 'AND')),
+
+			array ('ip_get_arpa', array ("\xAC\x11\xBB")),
+			array ('ip_get_arpa', array ("\xAC\x11\xBB\x00\x00")),
+
+			array ('goodModeForVSTRole', array (NULL, NULL)),
+			array ('goodModeForVSTRole', array (FALSE, NULL)),
+			array ('goodModeForVSTRole', array ('', NULL)),
+			array ('goodModeForVSTRole', array ('unknown', NULL)),
+
+			array ('makeSetSQL', array (array())),
+		);
+	}
+
+	public function providerMakeWhereSQL ()
+	{
+		return array
+		(
+			array (array ('one' => 1), 'AND', 'one=?', array (1)),
+			array (array ('one' => NULL), 'AND', 'one IS NULL', array()),
+			array (array ('one' => 1, 'two' => 2), 'AND', 'one=? AND two=?', array (1, 2)),
+			array (array ('one' => NULL, 'two' => 2), 'AND', 'one IS NULL AND two=?', array (2)),
+			array (array ('one' => 1, 'two' => 2, 'three' => 3), 'OR', 'one=? OR two=? OR three=?', array (1, 2, 3)),
 		);
 	}
 }

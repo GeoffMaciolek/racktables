@@ -742,19 +742,26 @@ function addPortForwarding ()
 	}
 	assertStringArg ('description', TRUE);
 	$remoteport = isset ($_REQUEST['remoteport']) ? $_REQUEST['remoteport'] : '';
-	if (!strlen ($remoteport))
+	if ($remoteport == '')
 		$remoteport = $_REQUEST['localport'];
 
-	newPortForwarding
-	(
-		getBypassValue(),
-		genericAssertion ('localip', 'inet4'),
-		$_REQUEST['localport'],
-		genericAssertion ('remoteip', 'inet4'),
-		$remoteport,
-		$proto,
-		$_REQUEST['description']
-	);
+	try
+	{
+		newPortForwarding
+		(
+			getBypassValue(),
+			genericAssertion ('localip', 'inet4'),
+			$_REQUEST['localport'],
+			genericAssertion ('remoteip', 'inet4'),
+			$remoteport,
+			$proto,
+			$_REQUEST['description']
+		);
+	}
+	catch (InvalidArgException $iae)
+	{
+		throw $iae->newIRAE();
+	}
 	showFuncMessage (__FUNCTION__, 'OK');
 }
 
@@ -846,20 +853,8 @@ function addMultiPorts ()
 	$format = genericAssertion ('format', 'string');
 	$port_type = genericAssertion ('port_type', 'string');
 	$object_id = getBypassValue();
-	// Input lines are escaped, so we have to explode and to chop by 2-char
-	// \n and \r respectively.
-	$lines1 = explode ("\n", $_REQUEST['input']);
-	foreach ($lines1 as $line)
-	{
-		$parts = explode ('\r', $line);
-		reset ($parts);
-		if (!strlen ($parts[0]))
-			continue;
-		else
-			$lines2[] = rtrim ($parts[0]);
-	}
 	$ports = array();
-	foreach ($lines2 as $line)
+	foreach (textareaCooked ($_REQUEST['input']) as $line)
 	{
 		switch ($format)
 		{
@@ -909,7 +904,7 @@ http://www.cisco.com/en/US/products/hw/routers/ps274/products_tech_note09186a008
 				break;
 			case 'ssv1':
 				$words = explode (' ', $line);
-				if (!strlen ($words[0])) // empty L2 address is OK
+				if ($words[0] == '') // empty L2 address is OK
 					continue;
 				$ports[] = array
 				(
@@ -928,15 +923,23 @@ http://www.cisco.com/en/US/products/hw/routers/ps274/products_tech_note09186a008
 	foreach ($ports as $port)
 	{
 		$port_ids = getPortIDs ($object_id, $port['name']);
-		if (!count ($port_ids))
+		try
 		{
-			commitAddPort ($object_id, $port['name'], $port_type, $port['label'], $port['l2address']);
-			$added_count++;
+			if (!count ($port_ids))
+			{
+				commitAddPort ($object_id, $port['name'], $port_type, $port['label'], $port['l2address']);
+				$added_count++;
+			}
+			elseif (count ($port_ids) == 1) // update only single-socket ports
+			{
+				$rsvc = getPortReservationComment (array_first ($port_ids));
+				commitUpdatePort ($object_id, $port_ids[0], $port['name'], $port_type, $port['label'], $port['l2address'], $rsvc);
+				$updated_count++;
+			}
 		}
-		elseif (count ($port_ids) == 1) // update only single-socket ports
+		catch (InvalidArgException $iae)
 		{
-			commitUpdatePort ($object_id, $port_ids[0], $port['name'], $port_type, $port['label'], $port['l2address']);
-			$updated_count++;
+			showError ($iae->getMessage());
 		}
 	}
 	showFuncMessage (__FUNCTION__, 'OK', array ($added_count, $updated_count, $error_count));
@@ -1001,13 +1004,13 @@ function addIPAllocation ()
 	if(!empty($address['allocs']) && ( ($address['allocs'][0]['type'] != 'shared') || ($alloc_type != 'shared') ) )
 		showWarning("IP ".ip_format($ip_bin)." already in use by ".$address['allocs'][0]['object_name']." - ".$address['allocs'][0]['name']);
 
-	if  (getConfigVar ('IPV4_JAYWALK') != 'yes' and NULL === getIPAddressNetworkId ($ip_bin))
+	if (getConfigVar ('IPV4_JAYWALK') != 'yes' && NULL === getIPAddressNetworkId ($ip_bin))
 	{
 		showFuncMessage (__FUNCTION__, 'ERR1', array (ip_format ($ip_bin)));
 		return;
 	}
 
-	if($address['reserved'] && strlen ($address['name']))
+	if($address['reserved'] && $address['name'] != '')
 	{
 		showWarning("IP ".ip_format($ip_bin)." reservation \"".$address['name']."\" is removed");
 		//TODO ask to take reserved IP or not !
@@ -1148,7 +1151,7 @@ function updateUser ()
 	$new_password = assertStringArg ('password', TRUE);
 	$userinfo = spotEntity ('user', $user_id);
 	// Set new password only if provided.
-	$new_password = mb_strlen ($new_password) ? sha1 ($new_password) : $userinfo['user_password_hash'];
+	$new_password = $new_password != '' ? sha1 ($new_password) : $userinfo['user_password_hash'];
 	commitUpdateUserAccount ($user_id, $username, $_REQUEST['realname'], $new_password);
 	// if user account renaming is being performed, change key value in UserConfig table
 	if ($userinfo['user_name'] !== $username)
@@ -1189,6 +1192,77 @@ function clearSticker ()
 		$oldvalues = getAttrValues (getBypassValue());
 		showError ('Permission denied, "' . $oldvalues[$attr_id]['name'] . '" left unchanged');
 	}
+}
+
+// This function accepts rack data returned by amplifyCell(), validates and applies changes
+// supplied in $_REQUEST and returns resulting array. Only those changes are examined that
+// correspond to current rack ID.
+// 1st arg is rackdata, 2nd arg is unchecked state, 3rd arg is checked state.
+// If 4th arg is present, object_id fields will be updated accordingly to the new state.
+// The function returns TRUE if the DB was successfully changed, FALSE otherwise
+function processGridForm (&$rackData, $unchecked_state, $checked_state, $object_id = 0)
+{
+	global $loclist, $dbxlink;
+	$rack_id = $rackData['id'];
+	$rack_name = $rackData['name'];
+	$rackchanged = FALSE;
+	$dbxlink->beginTransaction();
+	for ($unit_no = $rackData['height']; $unit_no > 0; $unit_no--)
+	{
+		for ($locidx = 0; $locidx < 3; $locidx++)
+		{
+			if ($rackData[$unit_no][$locidx]['enabled'] != TRUE)
+				continue;
+			// detect a change
+			$state = $rackData[$unit_no][$locidx]['state'];
+			$newstate = isCheckSet ("atom_${rack_id}_${unit_no}_${locidx}") ? $checked_state : $unchecked_state;
+			if ($state == $newstate)
+				continue;
+			$rackchanged = TRUE;
+			// and validate
+			$atom = $loclist[$locidx];
+			// The only changes allowed are those introduced by checkbox grid.
+			if
+			(
+				!($state == $checked_state && $newstate == $unchecked_state) &&
+				!($state == $unchecked_state && $newstate == $checked_state)
+			)
+			{
+				showError ("${rack_name}: Rack ID ${rack_id}, unit ${unit_no}, 'atom ${atom}', cannot change state from '${state}' to '${newstate}'");
+				$dbxlink->rollBack();
+				return FALSE;
+			}
+			// Here we avoid using ON DUPLICATE KEY UPDATE by first performing DELETE
+			// anyway and then looking for probable need of INSERT.
+			usePreparedDeleteBlade ('RackSpace', array ('rack_id' => $rack_id, 'unit_no' => $unit_no, 'atom' => $atom));
+			if ($newstate != 'F')
+				usePreparedInsertBlade ('RackSpace', array ('rack_id' => $rack_id, 'unit_no' => $unit_no, 'atom' => $atom, 'state' => $newstate));
+			if ($newstate == 'T' && $object_id != 0)
+			{
+				// At this point we already have a record in RackSpace.
+				usePreparedUpdateBlade
+				(
+					'RackSpace',
+					array ('object_id' => $object_id),
+					array
+					(
+						'rack_id' => $rack_id,
+						'unit_no' => $unit_no,
+						'atom' => $atom,
+					)
+				);
+				$rackData[$unit_no][$locidx]['object_id'] = $object_id;
+			}
+		}
+	}
+	if ($rackchanged)
+	{
+		usePreparedDeleteBlade ('RackThumbnail', array ('rack_id' => $rack_id));
+		$dbxlink->commit();
+		return TRUE;
+	}
+	$dbxlink->rollBack();
+	return FALSE;
 }
 
 function updateObjectAllocation ()
@@ -1332,7 +1406,7 @@ function updateObjectAttributes ($object_id)
 
 		// If the object is a rack, skip certain attributes as they are handled elsewhere
 		// (height, sort_order)
-		if ($type_id == 1560 and ($attr_id == 27 or $attr_id == 29))
+		if ($type_id == 1560 && ($attr_id == 27 || $attr_id == 29))
 			continue;
 
 		// Delete attribute and move on, when the field is empty or if the field
@@ -1378,42 +1452,32 @@ function updateObjectAttributes ($object_id)
 function addMultipleObjects()
 {
 	$taglist = genericAssertion ('taglist', 'array0');
-	$max = getConfigVar ('MASSCOUNT');
+	$max = genericAssertion ('num_records', 'uint');
 	for ($i = 0; $i < $max; $i++)
 	{
-		if (!isset ($_REQUEST["${i}_object_type_id"]))
-		{
-			showError ('Submitted form is invalid at line ' . ($i + 1));
-			return;
-		}
-
-		assertUIntArg ("${i}_object_type_id", TRUE);
+		$tid = genericAssertion ("${i}_object_type_id", 'uint0');
 		assertStringArg ("${i}_object_name", TRUE);
 		assertStringArg ("${i}_object_label", TRUE);
 		assertStringArg ("${i}_object_asset_no", TRUE);
 		$name = $_REQUEST["${i}_object_name"];
 
-		// It's better to skip silently, than to print a notice.
-		if ($_REQUEST["${i}_object_type_id"] == 0)
-			continue;
+		if ($tid == 0)
+			continue; // Just skip on intact SELECT.
 		try
 		{
 			$object_id = commitAddObject
 			(
 				$name,
 				$_REQUEST["${i}_object_label"],
-				$_REQUEST["${i}_object_type_id"],
+				$tid,
 				$_REQUEST["${i}_object_asset_no"],
 				$taglist
 			);
-			$info = spotEntity ('object', $object_id);
-			amplifyCell ($info);
-			showSuccess ("added object " . formatPortLink ($info['id'], $info['dname'], NULL, NULL));
+			showSuccess ('added object ' . mkCellA (spotEntity ('object', $object_id)));
 		}
 		catch (RTDatabaseError $e)
 		{
 			showError ("Error creating object '$name': " . $e->getMessage());
-			continue;
 		}
 	}
 }
@@ -1423,39 +1487,21 @@ function addLotOfObjects()
 	$taglist = genericAssertion ('taglist', 'array0');
 	assertStringArg ('namelist', TRUE);
 	$global_type_id = genericAssertion ('global_type_id', 'uint0');
-	if ($global_type_id == 0 or !strlen ($_REQUEST['namelist']))
+	if ($global_type_id == 0 || $_REQUEST['namelist'] == '')
 	{
 		showError ('Incomplete form has been ignored. Cheers.');
 		return;
 	}
-	else
-	{
-		// The name extractor below was stolen from ophandlers.php:addMultiPorts()
-		$names1 = explode ("\n", $_REQUEST['namelist']);
-		$names2 = array();
-		foreach ($names1 as $line)
+	foreach (textareaCooked ($_REQUEST['namelist']) as $name)
+		try
 		{
-			$parts = explode ('\r', $line);
-			reset ($parts);
-			if (!strlen ($parts[0]))
-				continue;
-			else
-				$names2[] = rtrim ($parts[0]);
+			$object_id = commitAddObject ($name, NULL, $global_type_id, '', $taglist);
+			showSuccess ('added object ' . mkCellA (spotEntity ('object', $object_id)));
 		}
-		foreach ($names2 as $name)
-			try
-			{
-				$object_id = commitAddObject ($name, NULL, $global_type_id, '', $taglist);
-				$info = spotEntity ('object', $object_id);
-				amplifyCell ($info);
-				showSuccess ("added object " . formatPortLink ($info['id'], $info['dname'], NULL, NULL));
-			}
-			catch (RackTablesError $e)
-			{
-				showError ("Error creating object '$name': " . $e->getMessage());
-				continue;
-			}
-	}
+		catch (RackTablesError $e)
+		{
+			showError ("Failed to add object '$name': " . $e->getMessage());
+		}
 }
 
 function linkObjects ()
@@ -1659,7 +1705,7 @@ function addRealServer ()
 	addRStoRSPool
 	(
 		getBypassValue(),
-		genericAssertion ('rsip', 'inet4'),
+		genericAssertion ('rsip', 'inet'),
 		genericAssertion ('rsport', 'string0'),
 		isCheckSet ('inservice', 'yesno'),
 		genericAssertion ('rsconfig', 'string0'),
@@ -1677,7 +1723,7 @@ function addRealServers ()
 	// Keep in mind, that the text will have HTML entities (namely '>') escaped.
 	foreach (explode ("\n", dos2unix (genericAssertion ('rawtext', 'string'))) as $line)
 	{
-		if (!strlen ($line))
+		if ($line == '')
 			continue;
 		$match = array ();
 		switch ($format)
@@ -1722,7 +1768,7 @@ function addVService ()
 		'IPv4VS',
 		array
 		(
-			'vip' => genericAssertion ('vip', 'inet4'),
+			'vip' => genericAssertion ('vip', 'inet'),
 			'vport' => $proto == 'MARK' ? NULL : genericAssertion ('vport', 'uint'),
 			'proto' => $proto,
 			'name' => nullIfEmptyStr ($_REQUEST['name']),
@@ -1796,7 +1842,7 @@ function updateRealServer ()
 	setFuncMessages (__FUNCTION__, array ('OK' => 51));
 	commitUpdateRS (
 		genericAssertion ('rs_id', 'uint'),
-		genericAssertion ('rsip', 'inet4'),
+		genericAssertion ('rsip', 'inet'),
 		genericAssertion ('rsport', 'string0'),
 		isCheckSet ('inservice', 'yesno'),
 		genericAssertion ('rsconfig', 'string0'),
@@ -1815,7 +1861,7 @@ function updateVService ()
 	assertStringArg ('name', TRUE);
 	commitUpdateVS (
 		$vs_id,
-		genericAssertion ('vip', 'inet4'),
+		genericAssertion ('vip', 'inet'),
 		$_REQUEST['vport'],
 		$proto,
 		$_REQUEST['name'],
@@ -2287,12 +2333,11 @@ function submitSLBConfig ()
 function addLocation ()
 {
 	setFuncMessages (__FUNCTION__, array ('OK' => 5));
-	assertUIntArg ('parent_id', TRUE);
 	assertStringArg ('name');
 
 	$location_id = commitAddObject ($_REQUEST['name'], NULL, 1562, NULL);
-	if ($_REQUEST['parent_id'])
-		commitLinkEntities ('location', $_REQUEST['parent_id'], 'location', $location_id);
+	if (0 != $parent_id = genericAssertion ('parent_id', 'uint0'))
+		commitLinkEntities ('location', $parent_id, 'location', $location_id);
 	showSuccess ('added location ' . mkA ($_REQUEST['name'], 'location', $location_id));
 }
 
@@ -2361,11 +2406,11 @@ function deleteLocation ()
 function addRow ()
 {
 	setFuncMessages (__FUNCTION__, array ('OK' => 5));
-	assertUIntArg ('location_id', TRUE);
+	$location_id = genericAssertion ('location_id', 'uint0');
 	assertStringArg ('name');
 	$row_id = commitAddObject ($_REQUEST['name'], NULL, 1561, NULL);
-	if ($_REQUEST['location_id'])
-		commitLinkEntities ('location', $_REQUEST['location_id'], 'row', $row_id);
+	if ($location_id)
+		commitLinkEntities ('location', $location_id, 'row', $row_id);
 	showSuccess ('added row ' . mkA ($_REQUEST['name'], 'row', $row_id));
 }
 
@@ -2429,61 +2474,50 @@ function addRack ()
 	$rowInfo = getRowInfo ($row_id);
 	$sort_order = $rowInfo['count']+1;
 
-	if (isset ($_REQUEST['got_data']))
+	switch (genericAssertion ('mode', 'string'))
 	{
+	case 'one':
 		assertStringArg ('name');
-		assertUIntArg ('height1');
+		$height = genericAssertion ('height1', 'uint');
 		assertStringArg ('asset_no', TRUE);
 		$rack_id = commitAddObject ($_REQUEST['name'], NULL, 1560, $_REQUEST['asset_no'], $taglist);
 
 		// Set the height and sort order
-		commitUpdateAttrValue ($rack_id, 27, $_REQUEST['height1']);
+		commitUpdateAttrValue ($rack_id, 27, $height);
 		commitUpdateAttrValue ($rack_id, 29, $sort_order);
 
 		// Link it to the row
 		commitLinkEntities ('row', $row_id, 'rack', $rack_id);
-		showSuccess ('added rack ' . mkA ($_REQUEST['name'], 'rack', $rack_id));
-	}
-	elseif (isset ($_REQUEST['got_mdata']))
-	{
-		assertUIntArg ('height2');
+		showSuccess ('added ' . mkCellA (spotEntity ('rack', $rack_id)));
+		break;
+	case 'many':
+		$height = genericAssertion ('height2', 'uint');
 		assertStringArg ('names', TRUE);
-		// copy-and-paste from renderAddMultipleObjectsForm()
-		$names1 = explode ("\n", $_REQUEST['names']);
-		$names2 = array();
-		foreach ($names1 as $line)
-		{
-			$parts = explode ('\r', $line);
-			reset ($parts);
-			if (!strlen ($parts[0]))
-				continue;
-			else
-				$names2[] = rtrim ($parts[0]);
-		}
-		foreach ($names2 as $cname)
+		foreach (textareaCooked ($_REQUEST['names']) as $cname)
 		{
 			$rack_id = commitAddObject ($cname, NULL, 1560, NULL, $taglist);
 
 			// Set the height and sort order
-			commitUpdateAttrValue ($rack_id, 27, $_REQUEST['height2']);
+			commitUpdateAttrValue ($rack_id, 27, $height);
 			commitUpdateAttrValue ($rack_id, 29, $sort_order);
 			$sort_order++;
 
 			// Link it to the row
 			commitLinkEntities ('row', $row_id, 'rack', $rack_id);
-			showSuccess ('added rack ' . mkA ($cname, 'rack', $rack_id));
+			showSuccess ('added ' . mkCellA (spotEntity ('rack', $rack_id)));
 		}
-	}
-	else
+		break;
+	default:
 		showFuncMessage (__FUNCTION__, 'ERR2');
+	}
 }
 
 function updateRack ()
 {
 	setFuncMessages (__FUNCTION__, array ('OK' => 6));
-	assertUIntArg ('row_id');
+	$row_id = genericAssertion ('row_id', 'uint');
 	assertStringArg ('name');
-	assertUIntArg ('height');
+	$height = genericAssertion ('height', 'uint');
 	assertStringArg ('asset_no', TRUE);
 	assertStringArg ('comment', TRUE);
 	$taglist = genericAssertion ('taglist', 'array0');
@@ -2492,9 +2526,9 @@ function updateRack ()
 	commitUpdateRack
 	(
 		$rack_id,
-		$_REQUEST['row_id'],
+		$row_id,
 		$_REQUEST['name'],
-		$_REQUEST['height'],
+		$height,
 		isCheckSet ('has_problems', 'yesno'),
 		$_REQUEST['asset_no'],
 		$_REQUEST['comment']
@@ -2507,23 +2541,22 @@ function updateRack ()
 function deleteRack ()
 {
 	setFuncMessages (__FUNCTION__, array ('OK' => 7, 'ERR1' => 206));
-	assertUIntArg ('rack_id');
-	$rackData = spotEntity ('rack', $_REQUEST['rack_id']);
+	$rackData = spotEntity ('rack', getBypassValue());
 	amplifyCell ($rackData);
 	if (!$rackData['isDeletable'])
 	{
 		showFuncMessage (__FUNCTION__, 'ERR1');
 		return;
 	}
-	commitDeleteRack ($_REQUEST['rack_id']);
-	showFuncMessage (__FUNCTION__, 'OK', array ($rackData['name']));
+	commitDeleteRack ($rackData['id']);
+	showFuncMessage (__FUNCTION__, 'OK', array (formatEntityName ($rackData)));
 	return buildRedirectURL ('rackspace', 'default');
 }
 
 function cleanRack ()
 {
 	setFuncMessages (__FUNCTION__, array ('OK' => 58));
-	$rack_id = assertUIntArg ('rack_id');
+	$rack_id = getBypassValue();
 	$unmounted = getRackMountsCount ($rack_id);
 	commitCleanRack ($rack_id);
 	showFuncMessage (__FUNCTION__, 'OK', array ($unmounted));
@@ -2553,9 +2586,9 @@ function updateRackProblems ()
 
 function querySNMPData ()
 {
-	genericAssertion ('ver', 'uint');
+	$ver = genericAssertion ('ver', 'uint');
 	$snmpsetup = array ();
-	switch ($_REQUEST['ver'])
+	switch ($ver)
 	{
 	case 1:
 	case 2:
@@ -2578,9 +2611,9 @@ function querySNMPData ()
 		$snmpsetup['priv_passphrase'] = $_REQUEST['priv_passphrase'];
 		break;
 	default:
-		throw new InvalidRequestArgException ('ver', $_REQUEST['ver']);
+		throw new InvalidRequestArgException ('ver', $ver);
 	}
-	$snmpsetup['version'] = $_REQUEST['ver'];
+	$snmpsetup['version'] = $ver;
 	doSNMPmining (getBypassValue(), $snmpsetup); // shows message by itself
 }
 
@@ -2761,9 +2794,8 @@ function delIIFOIFCompatPack ()
 function addOIFCompatPack ()
 {
 	setFuncMessages (__FUNCTION__, array ('OK' => 21));
-	genericAssertion ('standard', 'enum/wdmstd');
 	global $wdm_packs;
-	$oifs = $wdm_packs[$_REQUEST['standard']]['oif_ids'];
+	$oifs = $wdm_packs[genericAssertion ('standard', 'enum/wdmstd')]['oif_ids'];
 	foreach ($oifs as $oif_id_1)
 	{
 		$args = $qmarks = array();
@@ -2783,9 +2815,8 @@ function addOIFCompatPack ()
 function delOIFCompatPack ()
 {
 	setFuncMessages (__FUNCTION__, array ('OK' => 21));
-	genericAssertion ('standard', 'enum/wdmstd');
 	global $wdm_packs;
-	$oifs = $wdm_packs[$_REQUEST['standard']]['oif_ids'];
+	$oifs = $wdm_packs[genericAssertion ('standard', 'enum/wdmstd')]['oif_ids'];
 	foreach ($oifs as $oif_id_1)
 		foreach ($oifs as $oif_id_2)
 			if ($oif_id_1 != $oif_id_2) # leave narrow-band mapping intact
@@ -2831,9 +2862,9 @@ function del8021QOrder ()
 	usePreparedDeleteBlade ('VLANSwitch', array ('object_id' => $object_id));
 	$focus_hints = array
 	(
-		'prev_objid' => $_REQUEST['object_id'],
-		'prev_vstid' => $_REQUEST['vst_id'],
-		'prev_vdid' => $_REQUEST['vdom_id'],
+		'prev_objid' => $object_id,
+		'prev_vstid' => $vst_id,
+		'prev_vdid' => $vdom_id,
 	);
 	showFuncMessage (__FUNCTION__, 'OK');
 	return buildRedirectURL (NULL, NULL, $focus_hints);
@@ -2872,7 +2903,7 @@ function save8021QPorts ()
 	global $sic;
 	$object_id = getBypassValue();
 	$form_mode = genericAssertion ('form_mode', 'string');
-	if ($form_mode != 'save' and $form_mode != 'duplicate')
+	if ($form_mode != 'save' && $form_mode != 'duplicate')
 		throw new InvalidRequestArgException ('form_mode', $form_mode);
 	$extra = array();
 
@@ -2883,18 +2914,15 @@ function save8021QPorts ()
 	case 'save':
 		$nports = genericAssertion ('nports', 'uint');
 		if ($nports == 1)
-		{
-			assertStringArg ('pn_0');
-			$extra = array ('port_name' => $sic['pn_0']);
-		}
+			$extra = array ('port_name' => genericAssertion ('pn_0', 'string'));
 		for ($i = 0; $i < $nports; $i++)
 		{
-			assertStringArg ('pn_' . $i);
-			assertStringArg ('pm_' . $i);
+			$portname = assertStringArg ('pn_' . $i);
+			$portmode = assertStringArg ('pm_' . $i);
 			// An access port only generates form input for its native VLAN,
 			// which we derive allowed VLAN list from.
 			$native = isset ($sic['pnv_' . $i]) ? $sic['pnv_' . $i] : 0;
-			switch ($sic["pm_${i}"])
+			switch ($portmode)
 			{
 			case 'trunk':
 #				assertArrayArg ('pav_' . $i);
@@ -2907,11 +2935,11 @@ function save8021QPorts ()
 				$allowed = array ($native);
 				break;
 			default:
-				throw new InvalidRequestArgException ("pm_${i}", $_REQUEST["pm_${i}"], 'unknown port mode');
+				throw new InvalidRequestArgException ("pm_${i}", $portmode, 'unknown port mode');
 			}
-			$changes[$sic['pn_' . $i]] = array
+			$changes[$portname] = array
 			(
-				'mode' => $sic['pm_' . $i],
+				'mode' => $portmode,
 				'allowed' => $allowed,
 				'native' => $native,
 			);
@@ -2987,14 +3015,15 @@ function resolve8021QConflicts ()
 {
 	setFuncMessages (__FUNCTION__, array ('OK' => 63, 'ERR1' => 179, 'ERR2' => 109));
 	global $sic, $dbxlink;
-	assertUIntArg ('mutex_rev', TRUE); // counts from 0
-	assertUIntArg ('nrows');
+	$mutex_rev = genericAssertion ('mutex_rev', 'uint0'); // counts from 0
+	$nrows = genericAssertion ('nrows', 'uint');
+	$object_id = getBypassValue();
 	// Divide submitted radio buttons into 3 groups:
 	// left (saved version wins)
 	// asis (ignore)
 	// right (running version wins)
 	$F = array();
-	for ($i = 0; $i < $sic['nrows']; $i++)
+	for ($i = 0; $i < $nrows; $i++)
 	{
 		if (!array_key_exists ("i_${i}", $sic))
 			continue;
@@ -3018,10 +3047,10 @@ function resolve8021QConflicts ()
 	$dbxlink->beginTransaction();
 	try
 	{
-		if (NULL === $vswitch = getVLANSwitchInfo ($sic['object_id'], 'FOR UPDATE'))
-			throw new InvalidArgException ('object_id', $sic['object_id'], 'VLAN domain is not set for this object');
-		if ($vswitch['mutex_rev'] != $sic['mutex_rev'])
-			throw new InvalidRequestArgException ('mutex_rev', $sic['mutex_rev'], 'expired form (table data has changed)');
+		if (NULL === $vswitch = getVLANSwitchInfo ($object_id, 'FOR UPDATE'))
+			throw new InvalidArgException ('object_id', $object_id, 'VLAN domain is not set for this object');
+		if ($vswitch['mutex_rev'] != $mutex_rev)
+			throw new InvalidRequestArgException ('mutex_rev', $mutex_rev, 'expired form (table data has changed)');
 		$D = getStored8021QConfig ($vswitch['object_id'], 'desired');
 		$C = getStored8021QConfig ($vswitch['object_id'], 'cached');
 		$R = getRunning8021QConfig ($vswitch['object_id']);
@@ -3126,13 +3155,13 @@ function updVSTRule()
 			$rule_no++;
 			if
 			(
-				! isInteger (updVSTRule_get_named_param ('rule_no', $rule, $last_field))
-				or ! isPCRE (updVSTRule_get_named_param ('port_pcre', $rule, $last_field))
-				or NULL === updVSTRule_get_named_param ('port_role', $rule, $last_field)
-				or ! array_key_exists (updVSTRule_get_named_param ('port_role', $rule, $last_field), $port_role_options)
-				or NULL ===  updVSTRule_get_named_param ('wrt_vlans', $rule, $last_field)
-				or ! preg_match ('/^[ 0-9\-,]*$/',  updVSTRule_get_named_param ('wrt_vlans', $rule, $last_field))
-				or NULL ===  updVSTRule_get_named_param ('description', $rule, $last_field)
+				! isInteger (updVSTRule_get_named_param ('rule_no', $rule, $last_field)) ||
+				! isPCRE (updVSTRule_get_named_param ('port_pcre', $rule, $last_field)) ||
+				NULL === updVSTRule_get_named_param ('port_role', $rule, $last_field) ||
+				! array_key_exists (updVSTRule_get_named_param ('port_role', $rule, $last_field), $port_role_options) ||
+				NULL ===  updVSTRule_get_named_param ('wrt_vlans', $rule, $last_field) ||
+				! preg_match ('/^[ 0-9\-,]*$/',  updVSTRule_get_named_param ('wrt_vlans', $rule, $last_field)) ||
+				NULL ===  updVSTRule_get_named_param ('description', $rule, $last_field)
 			)
 				throw new InvalidRequestArgException ($last_field, $rule[$last_field], "rule #$rule_no");
 		}
@@ -3141,7 +3170,7 @@ function updVSTRule()
 	catch (Exception $e)
 	{
 		// Every case that is soft-processed in process.php, will have the working copy available for a retry.
-		if ($e instanceof InvalidRequestArgException or $e instanceof RTDatabaseError)
+		if ($e instanceof InvalidRequestArgException || $e instanceof RTDatabaseError)
 		{
 			startSession();
 			$_SESSION['vst_edited'] = $data;
@@ -3157,10 +3186,10 @@ function importDPData()
 {
 	setFuncMessages (__FUNCTION__, array ('OK' => 44));
 	global $sic, $dbxlink;
-	assertUIntArg ('nports');
+	$nports = genericAssertion ('nports', 'uint');
 	$object_id = getBypassValue();
 	$nignored = $ndone = 0;
-	for ($i = 0; $i < $sic['nports']; $i++)
+	for ($i = 0; $i < $nports; $i++)
 		if (array_key_exists ("do_${i}", $sic))
 		{
 			$params = array();
@@ -3174,15 +3203,15 @@ function importDPData()
 			}
 			if (! isset ($params['a_id']) || ! isset ($params['b_id']) ||
 				! intval ($params['a_id']) || ! intval ($params['b_id']))
-				throw new InvalidArgException ("ports_${i}", $_REQUEST["ports_${i}"], "can not unpack port ids");
+				throw new InvalidRequestArgException ("ports_${i}", $_REQUEST["ports_${i}"], "can not unpack port ids");
 
 			$porta = getPortInfo ($params['a_id']);
 			$portb = getPortInfo ($params['b_id']);
 			if
 			(
-				$porta['linked'] or
-				$portb['linked'] or
-				($porta['object_id'] != $object_id and $portb['object_id'] != $object_id)
+				$porta['linked'] ||
+				$portb['linked'] ||
+				($porta['object_id'] != $object_id && $portb['object_id'] != $object_id)
 			)
 			{
 				$nignored++;
@@ -3228,7 +3257,6 @@ function importDPData()
 
 function addObjectlog ()
 {
-	assertStringArg ('logentry');
 	global $remote_username, $sic;
 	if (isset ($sic['rack_id']))
 		$object_id = $sic['rack_id'];
@@ -3239,7 +3267,11 @@ function addObjectlog ()
 	else
 		$object_id = $sic['object_id'];
 
-	usePreparedExecuteBlade ('INSERT INTO ObjectLog SET object_id=?, user=?, date=NOW(), content=?', array ($object_id, $remote_username, $sic['logentry']));
+	usePreparedExecuteBlade
+	(
+		'INSERT INTO ObjectLog SET object_id=?, user=?, date=NOW(), content=?',
+		array ($object_id, $remote_username, genericAssertion ('logentry', 'string'))
+	);
 	showSuccess ('Log entry added');
 }
 
@@ -3390,7 +3422,7 @@ function cleanupUCS()
 		$o = spotEntity ('object', $item_id);
 		$attrs = getAttrValues ($item_id);
 		# use HW type to decide if the object was produced by autoPopulateUCS()
-		if (! array_key_exists (2, $attrs) or ! in_array ($attrs[2]['key'], $ucsproductmap))
+		if (! array_key_exists (2, $attrs) || ! in_array ($attrs[2]['key'], $ucsproductmap))
 		{
 			showWarning ('Contained object ' . mkA ($o['dname'], 'object', $item_id) . ' is not an automatic UCS object');
 			$clear = FALSE;
@@ -3419,8 +3451,8 @@ function getOpspec()
 	$ret = $opspec_list[$pageno . '-' . $tabno . '-' . $op];
 	if
 	(
-		!array_key_exists ('table', $ret)
-		or !array_key_exists ('action', $ret)
+		! array_key_exists ('table', $ret) ||
+		! array_key_exists ('action', $ret)
 		// add further checks here
 	)
 		throw new RackTablesError ('malformed array structure in opspec_list', RackTablesError::INTERNAL);
@@ -3429,28 +3461,25 @@ function getOpspec()
 
 function unlinkPort ()
 {
-	assertUIntArg ('port_id');
-	commitUnlinkPort ($_REQUEST['port_id']);
+	commitUnlinkPort (genericAssertion ('port_id', 'uint'));
 	showSuccess ("Port unlinked successfully");
 }
 
 function clearVlan()
 {
-	genericAssertion ('vlan_ck', 'uint-vlan1');
-	list ($vdom_id, $vlan_id) = decodeVLANCK ($_REQUEST['vlan_ck']);
+	list ($vdom_id, $vlan_id) = decodeVLANCK (genericAssertion ('vlan_ck', 'uint-vlan1'));
 
 	$n_cleared = pinpointDeleteVlan ($vdom_id, $vlan_id);
 	if ($n_cleared > 0)
-		showSuccess ("VLAN $vlan_id removed from $n_cleared ports");
+		showSuccess ("VLAN $vlan_id removed from $n_cleared port(s)");
 }
 
 function deleteVlan()
 {
-	genericAssertion ('vlan_ck', 'uint-vlan');
-	list ($vdom_id, $vlan_id) = decodeVLANCK ($_REQUEST['vlan_ck']);
+	list ($vdom_id, $vlan_id) = decodeVLANCK (genericAssertion ('vlan_ck', 'uint-vlan'));
 	$n_cleared = pinpointDeleteVlan ($vdom_id, $vlan_id);
 	if ($n_cleared > 0)
-		showSuccess ("VLAN $vlan_id removed from $n_cleared ports");
+		showSuccess ("VLAN $vlan_id removed from $n_cleared port(s)");
 	// since there is no strict foreign keys refering VLANDescription, we can delete a row
 	usePreparedDeleteBlade ('VLANDescription', array ('domain_id' => $vdom_id, 'vlan_id' => $vlan_id));
 	showSuccess ("VLAN $vlan_id has been deleted");
@@ -3459,8 +3488,7 @@ function deleteVlan()
 
 function cloneRSPool()
 {
-	assertUIntArg ('pool_id');
-	$pool = spotEntity ('ipv4rspool', $_REQUEST['pool_id']);
+	$pool = spotEntity ('ipv4rspool', getBypassValue());
 	$rs_list = getRSListInPool ($pool['id']);
 	$tagidlist = array();
 	foreach ($pool['etags'] as $taginfo)
@@ -3540,7 +3568,6 @@ function doVSMigrate()
 # validate user input and produce SQL columns per the opspec descriptor
 function buildOpspecColumns ($opspec, $listname)
 {
-	global $sic;
 	$columns = array();
 	if (! array_key_exists ($listname, $opspec))
 		throw new InvalidArgException ('opspec', '(malformed structure)', "missing '${listname}'");
@@ -3548,11 +3575,10 @@ function buildOpspecColumns ($opspec, $listname)
 		switch (TRUE)
 		{
 		case array_key_exists ('url_argname', $argspec): # HTTP input
-			genericAssertion ($argspec['url_argname'], $argspec['assertion']);
+			$arg_value = genericAssertion ($argspec['url_argname'], $argspec['assertion']);
 			// "table_colname" is normally used for an override, if it is not
 			// set, use the URL argument name
 			$table_colname = array_fetch ($argspec, 'table_colname', $argspec['url_argname']);
-			$arg_value = $sic[$argspec['url_argname']];
 			if (array_key_exists ('translator', $argspec))
 			{
 				if (! is_callable ($argspec['translator']))
@@ -3561,8 +3587,8 @@ function buildOpspecColumns ($opspec, $listname)
 			}
 			elseif // FIXME: remove the old declaration style at a later point
 			(
-				($argspec['assertion'] == 'uint0' and $arg_value == 0)
-				or ($argspec['assertion'] == 'string0' and $arg_value == '')
+				($argspec['assertion'] == 'uint0' && $arg_value == 0) ||
+				($argspec['assertion'] == 'string0' && $arg_value == '')
 			)
 				switch (TRUE)
 				{
@@ -3742,7 +3768,7 @@ function renameObjectPorts()
 		}
 	}
 	if ($n)
-		showSuccess ("Renamed $n ports");
+		showSuccess ("Renamed $n port(s)");
 	else
 		showNotice ("Nothing renamed");
 }
